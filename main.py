@@ -1,21 +1,102 @@
+from contextlib import asynccontextmanager
+from functools import lru_cache
+
 from fastapi import FastAPI
+from pydantic import BaseModel
 import numpy as np
 import pandas as pd
 from scipy import stats
 from sklearn.linear_model import LinearRegression
-from PIL import Image
 
-app = FastAPI()
+
+# ---------------------------------------------------------------------------
+# Model loading (lazy, cached)
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def get_qa_pipeline():
+    """Load the Q&A pipeline once and cache it."""
+    from transformers import pipeline
+
+    return pipeline(
+        "question-answering",
+        model="distilbert-base-uncased-distilled-squad",
+        tokenizer="distilbert-base-uncased-distilled-squad",
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Warm the model on startup so the first request isn't slow
+    get_qa_pipeline()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Request / response schemas
+# ---------------------------------------------------------------------------
+
+
+class QARequest(BaseModel):
+    question: str
+    context: str
+
+
+class QAResponse(BaseModel):
+    answer: str
+    score: float
+    start: int
+    end: int
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello, World!", "version": "0.2.0"}
+    return {"message": "Hello, World!", "version": "0.3.0"}
 
 
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.post("/ask", response_model=QAResponse)
+def ask_question(req: QARequest):
+    """
+    Extractive question-answering.
+
+    Send a **context** paragraph and a **question**; the model extracts
+    the most likely answer span from the context.
+
+    Example request body:
+    ```json
+    {
+      "question": "What is the capital of France?",
+      "context": "France is a country in Europe. Its capital is Paris."
+    }
+    ```
+    """
+    qa = get_qa_pipeline()
+    result = qa(question=req.question, context=req.context)
+    return QAResponse(
+        answer=result["answer"],
+        score=round(result["score"], 4),
+        start=result["start"],
+        end=result["end"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Existing data-science endpoints
+# ---------------------------------------------------------------------------
 
 
 @app.get("/stats")
